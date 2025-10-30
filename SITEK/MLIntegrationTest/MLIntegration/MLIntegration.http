@@ -1,0 +1,6 @@
+@MLIntegration_HostAddress = http://localhost:5134
+
+GET {{MLIntegration_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
