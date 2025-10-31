@@ -1,1 +1,8 @@
+
+# Environment and secrets
 .env
+
+# .NET build
+bin/
+obj/
+Migrations/
