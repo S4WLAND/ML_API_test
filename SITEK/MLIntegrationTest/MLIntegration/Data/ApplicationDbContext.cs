@@ -20,8 +20,15 @@ namespace MLIntegration.Data
                 entity.ToTable("MLTokens");
                 entity.HasKey(e => e.Id);
                 entity.HasIndex(e => e.UserId).IsUnique();
+
                 entity.Property(e => e.AccessToken).IsRequired();
                 entity.Property(e => e.RefreshToken).IsRequired();
+
+                entity.Property(e => e.IssuedAt).IsRequired();
+                entity.Property(e => e.RefreshTokenIssuedAt);
+                entity.Property(e => e.LastRefreshedAt);
+                entity.Property(e => e.RefreshCount).HasDefaultValue(0);
+                entity.Property(e => e.ExpiresAt).IsRequired();
             });
 
             modelBuilder.Entity<MLProduct>(entity =>
@@ -30,6 +37,8 @@ namespace MLIntegration.Data
                 entity.HasKey(e => e.Id);
                 entity.HasIndex(e => e.ItemId).IsUnique();
                 entity.Property(e => e.Price).HasColumnType("decimal(18,2)");
+                entity.Property(e => e.IsDeleted).HasDefaultValue(false);
+                entity.Property(e => e.DeletedAt);
             });
         }
     }

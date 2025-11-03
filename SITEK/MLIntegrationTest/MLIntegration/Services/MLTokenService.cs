@@ -1,6 +1,6 @@
 // ============================================
 // Services/MLTokenService.cs
-// Implementación del servicio de tokens
+// Implementación del servicio de tokens (ciclo de vida)
 // ============================================
 using System;
 using System.Linq;
@@ -24,9 +24,6 @@ namespace MLIntegration.Services
             _logger = logger;
         }
 
-        /// <summary>
-        /// Obtiene el token de un usuario
-        /// </summary>
         public async Task<MLToken> GetTokenAsync(int userId)
         {
             try
@@ -43,19 +40,15 @@ namespace MLIntegration.Services
             }
         }
 
-        /// <summary>
-        /// Guarda un nuevo token (primera vez)
-        /// </summary>
         public async Task SaveTokenAsync(int userId, MLAuthResponse authResponse)
         {
             try
             {
-                // Verificar si ya existe un token para este usuario
-                var existingToken = await GetTokenAsync(userId);
-                
-                if (existingToken != null)
+                var existing = await GetTokenAsync(userId);
+                var now = DateTime.UtcNow;
+
+                if (existing != null)
                 {
-                    // Si ya existe, actualizar
                     await UpdateTokenAsync(userId, authResponse);
                     return;
                 }
@@ -65,15 +58,18 @@ namespace MLIntegration.Services
                     UserId = userId,
                     AccessToken = authResponse.AccessToken,
                     RefreshToken = authResponse.RefreshToken,
-                    ExpiresAt = DateTime.UtcNow.AddSeconds(authResponse.ExpiresIn),
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
+                    IssuedAt = now,
+                    RefreshTokenIssuedAt = now,
+                    LastRefreshedAt = null,
+                    RefreshCount = 0,
+                    ExpiresAt = now.AddSeconds(authResponse.ExpiresIn),
+                    CreatedAt = now,
+                    UpdatedAt = now
                 };
 
                 _context.MLTokens.Add(token);
                 await _context.SaveChangesAsync();
-
-                _logger.LogInformation($"Token guardado para usuario {userId}, expira en {authResponse.ExpiresIn} segundos");
+                _logger.LogInformation($"Token guardado para usuario {userId}, expira en {authResponse.ExpiresIn} s");
             }
             catch (Exception ex)
             {
@@ -82,14 +78,12 @@ namespace MLIntegration.Services
             }
         }
 
-        /// <summary>
-        /// Actualiza el token existente
-        /// </summary>
         public async Task UpdateTokenAsync(int userId, MLAuthResponse authResponse)
         {
             try
             {
                 var token = await GetTokenAsync(userId);
+                var now = DateTime.UtcNow;
 
                 if (token == null)
                 {
@@ -97,15 +91,25 @@ namespace MLIntegration.Services
                     return;
                 }
 
+                var isRefreshRotation = !string.IsNullOrEmpty(authResponse.RefreshToken)
+                                        && authResponse.RefreshToken != token.RefreshToken;
+
                 token.AccessToken = authResponse.AccessToken;
-                token.RefreshToken = authResponse.RefreshToken;
-                token.ExpiresAt = DateTime.UtcNow.AddSeconds(authResponse.ExpiresIn);
-                token.UpdatedAt = DateTime.UtcNow;
+                token.RefreshToken = authResponse.RefreshToken ?? token.RefreshToken;
+                token.IssuedAt = now;
+                token.ExpiresAt = now.AddSeconds(authResponse.ExpiresIn);
+                token.UpdatedAt = now;
+
+                if (isRefreshRotation)
+                {
+                    token.RefreshTokenIssuedAt = now;
+                    token.LastRefreshedAt = now;
+                    token.RefreshCount += 1;
+                }
 
                 _context.MLTokens.Update(token);
                 await _context.SaveChangesAsync();
-
-                _logger.LogInformation($"Token actualizado para usuario {userId}, nueva expiración: {token.ExpiresAt}");
+                _logger.LogInformation($"Token actualizado para user {userId}. Expira: {token.ExpiresAt:O}");
             }
             catch (Exception ex)
             {
@@ -114,18 +118,12 @@ namespace MLIntegration.Services
             }
         }
 
-        /// <summary>
-        /// Verifica si el token de un usuario está por expirar
-        /// </summary>
         public async Task<bool> IsTokenExpiringSoonAsync(int userId, int minutesThreshold = 30)
         {
             try
             {
                 var token = await GetTokenAsync(userId);
-                
-                if (token == null)
-                    return false;
-
+                if (token == null) return false;
                 return token.ExpiresAt <= DateTime.UtcNow.AddMinutes(minutesThreshold);
             }
             catch (Exception ex)
@@ -135,18 +133,12 @@ namespace MLIntegration.Services
             }
         }
 
-        /// <summary>
-        /// Obtiene todos los tokens que están por expirar (para renovación automática)
-        /// </summary>
         public async Task<List<MLToken>> GetTokensExpiringSoonAsync(int minutesThreshold = 30)
         {
             try
             {
-                var expirationDate = DateTime.UtcNow.AddMinutes(minutesThreshold);
-                
-                return await _context.MLTokens
-                    .Where(t => t.ExpiresAt <= expirationDate)
-                    .ToListAsync();
+                var limit = DateTime.UtcNow.AddMinutes(minutesThreshold);
+                return await _context.MLTokens.Where(t => t.ExpiresAt <= limit).ToListAsync();
             }
             catch (Exception ex)
             {
@@ -155,15 +147,11 @@ namespace MLIntegration.Services
             }
         }
 
-        /// <summary>
-        /// Elimina el token de un usuario (por ejemplo, al desconectar cuenta)
-        /// </summary>
         public async Task DeleteTokenAsync(int userId)
         {
             try
             {
                 var token = await GetTokenAsync(userId);
-                
                 if (token != null)
                 {
                     _context.MLTokens.Remove(token);
