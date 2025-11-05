@@ -5,7 +5,6 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using MLIntegration.Models.MercadoLibre;
 using MLIntegration.Services;
@@ -47,7 +46,7 @@ namespace MLIntegration.Helpers
         /// </summary>
         public async Task<MLAuthResponse> RefreshAccessTokenAsync(int userId, string refreshToken)
         {
-            // Leer de variables de entorno
+            // ✅ Leer de variables de entorno
             var clientId = Environment.GetEnvironmentVariable("APP_ID");
             var clientSecret = Environment.GetEnvironmentVariable("SECRET_KEY");
 
@@ -179,55 +178,166 @@ namespace MLIntegration.Helpers
             => await ExecuteGetRequestAsync($"/categories/{categoryId}/attributes");
 
         /// <summary>
-        /// Obtiene los IDs de todos los productos activos del usuario desde MercadoLibre
+        /// Obtiene TODOS los IDs de productos del usuario (maneja paginación automáticamente)
         /// </summary>
         public async Task<List<string>> GetUserItemsAsync(int userId)
         {
+            var allIds = new List<string>();
             var accessToken = await GetValidAccessTokenAsync(userId);
+            var mlUserId = Environment.GetEnvironmentVariable("ML_USER_ID");
             
+            if (string.IsNullOrEmpty(mlUserId))
+            {
+                throw new InvalidOperationException("❌ ML_USER_ID no configurado en .env");
+            }
+
             _httpClient.DefaultRequestHeaders.Clear();
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            _logger.LogInformation($"🔍 Obteniendo productos para ML User ID: {mlUserId}");
+
+            // Primera request para saber el total
+            var firstResponse = await _httpClient.GetAsync(
+                $"{API_BASE_URL}/users/{mlUserId}/items/search?limit=50&status=active");
             
-            // Obtener ML User ID
-            var userResponse = await _httpClient.GetAsync($"{API_BASE_URL}/users/me");
-            if (!userResponse.IsSuccessStatusCode)
+            if (!firstResponse.IsSuccessStatusCode)
             {
-                throw new HttpRequestException($"Error obteniendo usuario: {userResponse.StatusCode}");
+                var errorContent = await firstResponse.Content.ReadAsStringAsync();
+                throw new HttpRequestException($"Error al buscar productos: {firstResponse.StatusCode} - {errorContent}");
             }
 
-            var userContent = await userResponse.Content.ReadAsStringAsync();
-            var userDoc = JsonDocument.Parse(userContent);
-            var mlUserId = userDoc.RootElement.GetProperty("id").GetInt64();
-
-            _logger.LogInformation($"🔍 Buscando productos para ML User ID: {mlUserId}");
-
-            // Buscar productos activos
-            var searchResponse = await _httpClient.GetAsync(
-                $"{API_BASE_URL}/users/{mlUserId}/items/search?status=active&limit=50"
-            );
+            var firstContent = await firstResponse.Content.ReadAsStringAsync();
+            var firstDoc = JsonDocument.Parse(firstContent);
             
-            if (!searchResponse.IsSuccessStatusCode)
-            {
-                var errorContent = await searchResponse.Content.ReadAsStringAsync();
-                throw new HttpRequestException($"Error al buscar productos: {searchResponse.StatusCode} - {errorContent}");
-            }
+            var total = firstDoc.RootElement.GetProperty("paging").GetProperty("total").GetInt32();
+            _logger.LogInformation($"📊 Total de productos encontrados: {total}");
 
-            var searchContent = await searchResponse.Content.ReadAsStringAsync();
-            var searchDoc = JsonDocument.Parse(searchContent);
-            
-            var itemIds = new List<string>();
-            if (searchDoc.RootElement.TryGetProperty("results", out var results))
+            // Agregar resultados de la primera página
+            if (firstDoc.RootElement.TryGetProperty("results", out var firstResults))
             {
-                itemIds = results.EnumerateArray()
+                var firstIds = firstResults.EnumerateArray()
                     .Select(item => item.GetString())
-                    .Where(id => !string.IsNullOrEmpty(id))
-                    .ToList();
+                    .Where(id => !string.IsNullOrEmpty(id));
+                allIds.AddRange(firstIds);
             }
 
-            _logger.LogInformation($"📦 Encontrados {itemIds.Count} productos activos");
-            return itemIds;
-        }
+            // Si hay más de 50 productos, paginar
+            if (total > 50)
+            {
+                // Si total <= 1000, usar offset
+                if (total <= 1000)
+                {
+                    _logger.LogInformation($"📄 Usando paginación con offset (total: {total})");
+                    
+                    for (int offset = 50; offset < total; offset += 50)
+                    {
+                        _logger.LogDebug($"📄 Obteniendo página: offset={offset}");
+                        
+                        var response = await _httpClient.GetAsync(
+                            $"{API_BASE_URL}/users/{mlUserId}/items/search?limit=50&offset={offset}&status=active");
+                        
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning($"⚠️ Error en página offset={offset}: {response.StatusCode}");
+                            continue;
+                        }
+                        
+                        var content = await response.Content.ReadAsStringAsync();
+                        var doc = JsonDocument.Parse(content);
+                        
+                        if (doc.RootElement.TryGetProperty("results", out var results))
+                        {
+                            var ids = results.EnumerateArray()
+                                .Select(item => item.GetString())
+                                .Where(id => !string.IsNullOrEmpty(id));
+                            allIds.AddRange(ids);
+                        }
+                        
+                        await Task.Delay(200); // Rate limiting
+                    }
+                }
+                else
+                {
+                    // Si total > 1000, usar scroll API
+                    _logger.LogInformation($"🔄 Usando scroll API (total: {total})");
+                    
+                    string scrollId = null;
+                    bool hasMore = true;
+                    int pageCount = 1;
+                    
+                    // Primera request con search_type=scan (ya tenemos los primeros 50, empezar desde página 2)
+                    var scanUrl = $"{API_BASE_URL}/users/{mlUserId}/items/search?search_type=scan&limit=100&status=active";
+                    var response = await _httpClient.GetAsync(scanUrl);
+                    var content = await response.Content.ReadAsStringAsync();
+                    var doc = JsonDocument.Parse(content);
+                    
+                    while (hasMore && pageCount < 100) // Límite de seguridad
+                    {
+                        pageCount++;
+                        
+                        if (doc.RootElement.TryGetProperty("results", out var results))
+                        {
+                            var ids = results.EnumerateArray()
+                                .Select(item => item.GetString())
+                                .Where(id => !string.IsNullOrEmpty(id))
+                                .ToList();
+                            
+                            if (ids.Count == 0)
+                            {
+                                _logger.LogInformation($"✅ No hay más resultados en página {pageCount}");
+                                hasMore = false;
+                                break;
+                            }
+                            
+                            allIds.AddRange(ids);
+                            _logger.LogDebug($"📄 Scroll página {pageCount}: {ids.Count} items");
+                        }
+                        
+                        // Obtener scroll_id para siguiente página
+                        if (doc.RootElement.TryGetProperty("scroll_id", out var scrollIdProp))
+                        {
+                            scrollId = scrollIdProp.GetString();
+                            
+                            if (string.IsNullOrEmpty(scrollId))
+                            {
+                                _logger.LogInformation($"✅ scroll_id vacío, fin de resultados");
+                                hasMore = false;
+                                break;
+                            }
+                            
+                            await Task.Delay(200); // Rate limiting
+                            
+                            // Siguiente página
+                            response = await _httpClient.GetAsync(
+                                $"{API_BASE_URL}/users/{mlUserId}/items/search?scroll_id={scrollId}&limit=100");
+                            
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                _logger.LogWarning($"⚠️ Error en scroll página {pageCount}: {response.StatusCode}");
+                                hasMore = false;
+                                break;
+                            }
+                            
+                            content = await response.Content.ReadAsStringAsync();
+                            doc = JsonDocument.Parse(content);
+                        }
+                        else
+                        {
+                            _logger.LogInformation($"✅ No hay scroll_id, fin de resultados");
+                            hasMore = false;
+                        }
+                    }
+                    
+                    if (pageCount >= 100)
+                    {
+                        _logger.LogWarning($"⚠️ Alcanzado límite de seguridad de 100 páginas");
+                    }
+                }
+            }
 
+            _logger.LogInformation($"✅ Total de IDs obtenidos: {allIds.Count}");
+            return allIds;
+        }
         #endregion
 
         #region POST
@@ -346,11 +456,12 @@ namespace MLIntegration.Helpers
         public async Task<SyncResult> SyncAllUserProductsAsync(int userId)
         {
             var result = new SyncResult();
-            
+
             try
             {
                 _logger.LogInformation($"🔄 Iniciando sincronización masiva para userId: {userId}");
-                
+
+                // 1. Obtener todos los IDs
                 var itemIds = await GetUserItemsAsync(userId);
                 result.TotalProducts = itemIds.Count;
 
@@ -360,37 +471,100 @@ namespace MLIntegration.Helpers
                     return result;
                 }
 
-                _logger.LogInformation($"📦 Sincronizando {itemIds.Count} productos...");
+                _logger.LogInformation($"📦 Sincronizando {itemIds.Count} productos en lotes de 20...");
 
-                foreach (var itemId in itemIds)
+                // 2. Procesar en lotes de 20 con Multiget
+                var batches = itemIds.Chunk(20).ToList();
+                int batchNumber = 0;
+
+                foreach (var batch in batches)
                 {
+                    batchNumber++;
+                    _logger.LogDebug($"📦 Procesando lote {batchNumber}/{batches.Count} ({batch.Count()} items)");
+
                     try
                     {
-                        _logger.LogDebug($"⏳ Procesando {itemId}...");
-                        
-                        // GetItemAsync ya guarda/actualiza en BD automáticamente
-                        await GetItemAsync(itemId, userId);
-                        
-                        var existingProduct = await _db.MLProducts
-                            .FirstOrDefaultAsync(p => p.UserId == userId && p.ItemId == itemId);
+                        var ids = string.Join(",", batch);
+                        var accessToken = await GetValidAccessTokenAsync(userId);
 
-                        if (existingProduct != null && existingProduct.CreatedAt == existingProduct.UpdatedAt)
+                        _httpClient.DefaultRequestHeaders.Clear();
+                        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                        // Multiget: hasta 20 items por request
+                        var response = await _httpClient.GetAsync($"{API_BASE_URL}/items?ids={ids}");
+                        var content = await response.Content.ReadAsStringAsync();
+
+                        if (!response.IsSuccessStatusCode)
                         {
-                            result.Created++;
-                        }
-                        else
-                        {
-                            result.Updated++;
+                            _logger.LogError($"❌ Error en lote {batchNumber}: {response.StatusCode} - {content}");
+                            result.Skipped += batch.Count();
+                            result.Errors.Add($"Lote {batchNumber}: HTTP {response.StatusCode}");
+                            continue;
                         }
 
-                        // Rate limiting: 200ms entre requests (máx 5 req/s)
+                        // Parse respuesta multiget
+                        var multigetResponse = JsonSerializer.Deserialize<List<JsonElement>>(content);
+
+                        foreach (var item in multigetResponse)
+                        {
+                            try
+                            {
+                                var code = item.GetProperty("code").GetInt32();
+
+                                if (code == 200)
+                                {
+                                    var body = item.GetProperty("body");
+                                    var itemId = body.GetProperty("id").GetString();
+
+                                    // Convertir a JsonDocument para reutilizar UpsertProductFromRemote
+                                    var itemDoc = JsonDocument.Parse(body.GetRawText());
+                                    await UpsertProductFromRemote(userId, itemDoc);
+
+                                    // Verificar si fue creado o actualizado
+                                    var existingProduct = await _db.MLProducts
+                                        .FirstOrDefaultAsync(p => p.UserId == userId && p.ItemId == itemId);
+
+                                    if (existingProduct != null)
+                                    {
+                                        var timeDiff = (existingProduct.UpdatedAt - existingProduct.CreatedAt).TotalSeconds;
+                                        if (timeDiff < 1)
+                                        {
+                                            result.Created++;
+                                            _logger.LogDebug($"✅ Creado: {itemId}");
+                                        }
+                                        else
+                                        {
+                                            result.Updated++;
+                                            _logger.LogDebug($"🔄 Actualizado: {itemId}");
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    var itemId = item.GetProperty("body").TryGetProperty("id", out var id)
+                                        ? id.GetString()
+                                        : "unknown";
+                                    result.Skipped++;
+                                    result.Errors.Add($"{itemId}: HTTP {code}");
+                                    _logger.LogWarning($"⚠️ Item {itemId} retornó código {code}");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "❌ Error procesando item individual en lote");
+                                result.Skipped++;
+                                result.Errors.Add($"Item en lote {batchNumber}: {ex.Message}");
+                            }
+                        }
+
+                        // Rate limiting: 200ms entre lotes
                         await Task.Delay(200);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, $"❌ Error procesando producto {itemId}");
-                        result.Errors.Add($"{itemId}: {ex.Message}");
-                        result.Skipped++;
+                        _logger.LogError(ex, $"❌ Error procesando lote {batchNumber}");
+                        result.Skipped += batch.Count();
+                        result.Errors.Add($"Lote {batchNumber}: {ex.Message}");
                     }
                 }
 

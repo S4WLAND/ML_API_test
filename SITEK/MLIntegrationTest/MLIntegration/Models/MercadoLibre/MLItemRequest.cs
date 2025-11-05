@@ -4,8 +4,8 @@ namespace MLIntegration.Models.MercadoLibre
 {
     public class MLItemRequest
     {
-        [JsonPropertyName("family_name")]
-        public string FamilyName { get; set; }
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
 
         [JsonPropertyName("category_id")]
         public string CategoryId { get; set; }
@@ -50,7 +50,7 @@ namespace MLIntegration.Models.MercadoLibre
         public string Id { get; set; }
 
         [JsonPropertyName("value_id")]
-        public string ValueId { get; set; }
+        public string? ValueId { get; set; }
 
         [JsonPropertyName("value_name")]
         public string ValueName { get; set; }

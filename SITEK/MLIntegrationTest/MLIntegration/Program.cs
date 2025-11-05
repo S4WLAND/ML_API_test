@@ -66,5 +66,5 @@ app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
 
-Console.WriteLine("✅ API iniciada: http://localhost:5000");
+Console.WriteLine("✅ API iniciada");
 app.Run();

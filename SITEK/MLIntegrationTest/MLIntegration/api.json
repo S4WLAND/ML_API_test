@@ -1,0 +1,40 @@
+{
+  "family_name": "R4 Módulo Simodrive 611 - 6sn1123-1aa00-0ca0_api_test_2",
+  "category_id": "MLA30216",
+  "price": 4000000,
+  "currency_id": "ARS",
+  "available_quantity": 5,
+  "buying_mode": "buy_it_now",
+  "listing_type_id": "gold_special",
+  "condition": "used",
+  "channels": [
+    "marketplace",
+    "mshops"
+  ],
+  "pictures": [
+    {
+      "source": "https://http2.mlstatic.com/D_822152-MLA96503325939_102025-O.jpg"
+    }
+  ],
+  "attributes": [
+    {
+      "id": "BRAND",
+      "value_id": "19317",
+      "value_name": "Siemens"
+    },
+    {
+      "id": "MODEL",
+      "value_name": "6SN1123-1AA00-0CA0_api_test_2"
+    },
+    {
+      "id": "VALUE_ADDED_TAX",
+      "value_id": "48405909",
+      "value_name": "21 %"
+    },
+    {
+      "id": "IMPORT_DUTY",
+      "value_id": "49553239",
+      "value_name": "0 %"
+    }
+  ]
+}
